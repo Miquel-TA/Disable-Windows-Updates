@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 
 namespace DisableWindowsUpdates;
 
@@ -14,6 +15,7 @@ internal sealed class WindowsUpdateManager
 
     private readonly StateRepository _stateRepository;
     private readonly TrayNotifier _notifier;
+    private readonly HashSet<string> _reportedMissingServices = new(StringComparer.OrdinalIgnoreCase);
 
     public WindowsUpdateManager(StateRepository stateRepository, TrayNotifier notifier)
     {
@@ -27,7 +29,12 @@ internal sealed class WindowsUpdateManager
         {
             foreach (var target in ServiceTargets)
             {
-                if (ServiceManager.GetStartType(target.Name) != (uint)ServiceStartType.Disabled)
+                if (!TryGetStartType(target.Name, out var startType))
+                {
+                    continue;
+                }
+
+                if (startType != (uint)ServiceStartType.Disabled)
                 {
                     return WindowsUpdateState.Enabled;
                 }
@@ -36,9 +43,14 @@ internal sealed class WindowsUpdateManager
             return WindowsUpdateState.Disabled;
         }
 
-        return ServiceManager.GetStartType("wuauserv") == (uint)ServiceStartType.Disabled
-            ? WindowsUpdateState.Disabled
-            : WindowsUpdateState.Enabled;
+        if (TryGetStartType("wuauserv", out var wuauservStartType))
+        {
+            return wuauservStartType == (uint)ServiceStartType.Disabled
+                ? WindowsUpdateState.Disabled
+                : WindowsUpdateState.Enabled;
+        }
+
+        return WindowsUpdateState.Enabled;
     }
 
     public void DisableUpdates()
@@ -183,6 +195,35 @@ internal sealed class WindowsUpdateManager
             _notifier.ShowInfo("Windows Updates have been re-enabled.");
         }
     }
+
+    private bool TryGetStartType(string serviceName, out uint startType)
+    {
+        try
+        {
+            startType = ServiceManager.GetStartType(serviceName);
+            return true;
+        }
+        catch (InvalidOperationException ex)
+        {
+            ReportMissingService(serviceName, ex);
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 1060)
+        {
+            ReportMissingService(serviceName, ex);
+        }
+
+        startType = default;
+        return false;
+    }
+
+    private void ReportMissingService(string serviceName, Exception ex)
+    {
+        if (_reportedMissingServices.Add(serviceName))
+        {
+            _notifier.ShowWarning($"Service {serviceName} was not found on this system and will be skipped when evaluating Windows Update state: {ex.Message}");
+        }
+    }
+
 }
 
 internal sealed class ServiceTarget
