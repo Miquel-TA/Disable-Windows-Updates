@@ -25,22 +25,37 @@ internal sealed class WindowsUpdateManager
 
     public WindowsUpdateState GetCurrentState()
     {
-        if (_stateRepository.TryLoad(out var state) && state.UpdatesDisabled)
+        if (_stateRepository.TryLoad(out var state))
         {
-            foreach (var target in ServiceTargets)
+            var hasPersistedServices = state.Services is { Count: > 0 };
+
+            if (state.UpdatesDisabled)
             {
-                if (!TryGetStartType(target.Name, out var startType))
+                if (hasPersistedServices)
                 {
-                    continue;
+                    return WindowsUpdateState.Disabled;
                 }
 
-                if (startType != (uint)ServiceStartType.Disabled)
+                foreach (var target in ServiceTargets)
                 {
-                    return WindowsUpdateState.Enabled;
+                    if (!TryGetStartType(target.Name, out var startType))
+                    {
+                        continue;
+                    }
+
+                    if (startType != (uint)ServiceStartType.Disabled)
+                    {
+                        return WindowsUpdateState.Enabled;
+                    }
                 }
+
+                return WindowsUpdateState.Disabled;
             }
 
-            return WindowsUpdateState.Disabled;
+            if (hasPersistedServices)
+            {
+                return WindowsUpdateState.Disabled;
+            }
         }
 
         if (TryGetStartType("wuauserv", out var wuauservStartType))
