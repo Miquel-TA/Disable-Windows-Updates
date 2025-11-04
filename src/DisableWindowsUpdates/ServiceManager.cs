@@ -9,8 +9,6 @@ namespace DisableWindowsUpdates;
 
 internal static class ServiceManager
 {
-    private const int DaclSecurityInformation = 0x00000004;
-
     public static uint GetStartType(string serviceName)
     {
         using var controller = new ServiceController(serviceName);
@@ -53,11 +51,17 @@ internal static class ServiceManager
 
     public static void RestoreSecurityDescriptor(string serviceName, byte[] descriptor)
     {
-        using var controller = new ServiceController(serviceName);
-        if (!NativeMethods.SetServiceObjectSecurity(controller.ServiceHandle.DangerousGetHandle(), DaclSecurityInformation, descriptor))
+        if (descriptor == null)
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error());
+            throw new ArgumentNullException(nameof(descriptor));
         }
+
+        using var controller = new ServiceController(serviceName);
+        var security = controller.GetAccessControl();
+        var commonDescriptor = new CommonSecurityDescriptor(isContainer: false, isDS: false, descriptor, 0);
+        var sddl = commonDescriptor.GetSddlForm(AccessControlSections.Access);
+        security.SetSecurityDescriptorSddlForm(sddl, AccessControlSections.Access);
+        controller.SetAccessControl(security);
     }
 
     public static void ApplyLockdown(string serviceName)
@@ -142,8 +146,6 @@ internal static class ServiceManager
         [DllImport("advapi32.dll", SetLastError = true)]
         public static extern bool QueryServiceConfig(IntPtr hService, IntPtr lpServiceConfig, uint cbBufSize, out uint pcbBytesNeeded);
 
-        [DllImport("advapi32.dll", SetLastError = true)]
-        public static extern bool SetServiceObjectSecurity(IntPtr hService, int dwSecurityInformation, byte[] lpSecurityDescriptor);
     }
 }
 
