@@ -177,4 +177,21 @@ internal sealed class WindowsUpdateManager
     }
 }
 
-internal sealed record ServiceTarget(string Name, bool LockDown, bool StopWhenDisabling, bool StartWhenEnabling);
+internal sealed class ServiceTarget
+{
+    public ServiceTarget(string name, bool lockDown, bool stopWhenDisabling, bool startWhenEnabling)
+    {
+        Name = name ?? throw new ArgumentNullException(nameof(name));
+        LockDown = lockDown;
+        StopWhenDisabling = stopWhenDisabling;
+        StartWhenEnabling = startWhenEnabling;
+    }
+
+    public string Name { get; }
+
+    public bool LockDown { get; }
+
+    public bool StopWhenDisabling { get; }
+
+    public bool StartWhenEnabling { get; }
+}
