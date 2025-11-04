@@ -106,8 +106,13 @@ internal sealed class WindowsUpdateManager
 
         state.Services ??= new Dictionary<string, ServiceSnapshot>(StringComparer.OrdinalIgnoreCase);
 
+        var restoredServices = new List<string>();
+        var restoreFailed = false;
+
         foreach (var target in ServiceTargets)
         {
+            var restoredSuccessfully = false;
+
             try
             {
                 if (state.Services.TryGetValue(target.Name, out var snapshot))
@@ -136,18 +141,39 @@ internal sealed class WindowsUpdateManager
                         _notifier.ShowWarning($"Failed to start service {target.Name}: {startEx.Message}");
                     }
                 }
+
+                restoredSuccessfully = true;
             }
             catch (Exception ex)
             {
+                restoreFailed = true;
                 _notifier.ShowWarning($"Failed to restore service {target.Name}: {ex.Message}");
+            }
+
+            if (restoredSuccessfully && state.Services.ContainsKey(target.Name))
+            {
+                restoredServices.Add(target.Name);
             }
         }
 
-        state.UpdatesDisabled = false;
-        state.Services.Clear();
-        _stateRepository.Clear();
+        foreach (var service in restoredServices)
+        {
+            state.Services.Remove(service);
+        }
 
-        _notifier.ShowInfo("Windows Updates have been re-enabled.");
+        if (restoreFailed)
+        {
+            state.UpdatesDisabled = state.Services.Count > 0;
+            _stateRepository.Save(state);
+            _notifier.ShowWarning("Some Windows Update services could not be fully restored. Retry enabling once underlying issues are resolved.");
+        }
+        else
+        {
+            state.UpdatesDisabled = false;
+            state.Services.Clear();
+            _stateRepository.Clear();
+            _notifier.ShowInfo("Windows Updates have been re-enabled.");
+        }
     }
 }
 
