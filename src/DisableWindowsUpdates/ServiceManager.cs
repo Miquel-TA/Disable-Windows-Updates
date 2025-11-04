@@ -10,8 +10,6 @@ namespace DisableWindowsUpdates;
 internal static class ServiceManager
 {
     private const int DaclSecurityInformation = 0x00000004;
-    private const int OwnerSecurityInformation = 0x00000001;
-    private const int GroupSecurityInformation = 0x00000002;
 
     public static uint GetStartType(string serviceName)
     {
@@ -56,7 +54,7 @@ internal static class ServiceManager
     public static void RestoreSecurityDescriptor(string serviceName, byte[] descriptor)
     {
         using var controller = new ServiceController(serviceName);
-        if (!NativeMethods.SetServiceObjectSecurity(controller.ServiceHandle.DangerousGetHandle(), OwnerSecurityInformation | GroupSecurityInformation | DaclSecurityInformation, descriptor))
+        if (!NativeMethods.SetServiceObjectSecurity(controller.ServiceHandle.DangerousGetHandle(), DaclSecurityInformation, descriptor))
         {
             throw new Win32Exception(Marshal.GetLastWin32Error());
         }
