@@ -2,117 +2,134 @@ using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 
-namespace DisableWindowsUpdates;
-
-internal static class SystemRestoreManager
+namespace DisableWindowsUpdates
 {
-    private const int MaxDescriptionLength = 256;
-
-    public static bool TryCreateRestorePoint(string description, out string? failureReason)
+    internal static class SystemRestoreManager
     {
-        if (string.IsNullOrWhiteSpace(description))
+        private const int MaxDescriptionLength = 256;
+
+        public static bool TryCreateRestorePoint(string description, out string failureReason)
         {
-            description = "Disable Windows Updates restore point";
-        }
-
-        var sanitizedDescription = SanitizeDescription(description);
-
-        try
-        {
-            var beginInfo = new RestorePointInfo
+            if (string.IsNullOrWhiteSpace(description))
             {
-                EventType = RestorePointEventType.BeginSystemChange,
-                RestorePointType = RestorePointType.ModifySettings,
-                SequenceNumber = 0,
-                Description = sanitizedDescription
-            };
-
-            if (!SRSetRestorePoint(ref beginInfo, out var status))
-            {
-                failureReason = GetLastErrorMessage();
-                return false;
+                description = "Disable Windows Updates restore point";
             }
 
-            var endInfo = new RestorePointInfo
-            {
-                EventType = RestorePointEventType.EndSystemChange,
-                RestorePointType = RestorePointType.ModifySettings,
-                SequenceNumber = status.SequenceNumber,
-                Description = sanitizedDescription
-            };
+            var sanitizedDescription = SanitizeDescription(description);
 
-            if (!SRSetRestorePoint(ref endInfo, out _))
+            try
             {
-                failureReason = GetLastErrorMessage();
+                var beginInfo = new RestorePointInfo
+                {
+                    EventType = RestorePointEventType.BeginSystemChange,
+                    RestorePointType = RestorePointType.ModifySettings,
+                    SequenceNumber = 0,
+                    Description = sanitizedDescription
+                };
+
+                StateManagerStatus status;
+                if (!SRSetRestorePoint(ref beginInfo, out status))
+                {
+                    failureReason = GetLastErrorMessage();
+                    Logger.Warning("Failed to start system restore point creation: " + failureReason);
+                    return false;
+                }
+
+                var endInfo = new RestorePointInfo
+                {
+                    EventType = RestorePointEventType.EndSystemChange,
+                    RestorePointType = RestorePointType.ModifySettings,
+                    SequenceNumber = status.SequenceNumber,
+                    Description = sanitizedDescription
+                };
+
+                StateManagerStatus endStatus;
+                if (!SRSetRestorePoint(ref endInfo, out endStatus))
+                {
+                    failureReason = GetLastErrorMessage();
+                    Logger.Warning("Failed to finalize system restore point creation: " + failureReason);
+                    return false;
+                }
+
+                failureReason = null;
+                Logger.Info("System restore point created with description: " + sanitizedDescription);
+                return true;
+            }
+            catch (ExternalException ex)
+            {
+                failureReason = ex.Message;
+                Logger.Error("System restore point creation failed due to an external exception.", ex);
                 return false;
             }
-
-            failureReason = null;
-            return true;
+            catch (Win32Exception ex)
+            {
+                failureReason = ex.Message;
+                Logger.Error("System restore point creation failed due to a Win32 exception.", ex);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                failureReason = ex.Message;
+                Logger.Error("System restore point creation failed due to an unexpected exception.", ex);
+                return false;
+            }
         }
-        catch (Exception ex) when (ex is ExternalException or Win32Exception)
+
+        private static string SanitizeDescription(string description)
         {
-            failureReason = ex.Message;
-            return false;
+            var trimmed = description.Trim();
+            if (trimmed.Length >= MaxDescriptionLength)
+            {
+                return trimmed.Substring(0, MaxDescriptionLength - 1);
+            }
+
+            return trimmed;
         }
-        catch (Exception ex)
+
+        private static string GetLastErrorMessage()
         {
-            failureReason = ex.Message;
-            return false;
+            var errorCode = Marshal.GetLastWin32Error();
+            if (errorCode == 0)
+            {
+                return "Unknown error while creating the restore point.";
+            }
+
+            var exception = new Win32Exception(errorCode);
+            return string.Format("{0} (0x{1:X8})", exception.Message, errorCode);
         }
-    }
 
-    private static string SanitizeDescription(string description)
-    {
-        var trimmed = description.Trim();
-        return trimmed.Length >= MaxDescriptionLength
-            ? trimmed.Substring(0, MaxDescriptionLength - 1)
-            : trimmed;
-    }
+        [DllImport("srclient.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool SRSetRestorePoint(ref RestorePointInfo restorePointInfo, out StateManagerStatus status);
 
-    private static string GetLastErrorMessage()
-    {
-        var errorCode = Marshal.GetLastWin32Error();
-        if (errorCode == 0)
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct RestorePointInfo
         {
-            return "Unknown error while creating the restore point.";
+            public RestorePointEventType EventType;
+            public RestorePointType RestorePointType;
+            public long SequenceNumber;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = MaxDescriptionLength)]
+            public string Description;
         }
 
-        var exception = new Win32Exception(errorCode);
-        return $"{exception.Message} (0x{errorCode:X8})";
-    }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct StateManagerStatus
+        {
+            public int Status;
+            public long SequenceNumber;
+        }
 
-    [DllImport("srclient.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool SRSetRestorePoint(ref RestorePointInfo restorePointInfo, out StateManagerStatus status);
+        private enum RestorePointEventType
+        {
+            BeginSystemChange = 100,
+            EndSystemChange = 101
+        }
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct RestorePointInfo
-    {
-        public RestorePointEventType EventType;
-        public RestorePointType RestorePointType;
-        public long SequenceNumber;
-
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = MaxDescriptionLength)]
-        public string Description;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct StateManagerStatus
-    {
-        public int Status;
-        public long SequenceNumber;
-    }
-
-    private enum RestorePointEventType
-    {
-        BeginSystemChange = 100,
-        EndSystemChange = 101
-    }
-
-    private enum RestorePointType
-    {
-        ApplicationInstall = 0,
-        ApplicationUninstall = 1,
-        ModifySettings = 12
+        private enum RestorePointType
+        {
+            ApplicationInstall = 0,
+            ApplicationUninstall = 1,
+            ModifySettings = 12
+        }
     }
 }
