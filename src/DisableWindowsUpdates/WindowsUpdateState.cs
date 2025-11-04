@@ -1,8 +1,9 @@
-namespace DisableWindowsUpdates;
-
-internal enum WindowsUpdateState
+namespace DisableWindowsUpdates
 {
-    Unknown = 0,
-    Enabled = 1,
-    Disabled = 2
+    internal enum WindowsUpdateState
+    {
+        Unknown = 0,
+        Enabled = 1,
+        Disabled = 2
+    }
 }

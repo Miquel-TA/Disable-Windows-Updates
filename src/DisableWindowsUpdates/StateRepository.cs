@@ -4,72 +4,89 @@ using System.IO;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 
-namespace DisableWindowsUpdates;
-
-internal sealed class StateRepository
+namespace DisableWindowsUpdates
 {
-    private const string StateFileName = "state.json";
-    private readonly string _stateDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DisableWindowsUpdates");
-
-    public bool TryLoad(out PersistentState state)
+    internal sealed class StateRepository
     {
-        var path = GetStateFilePath();
-        if (!File.Exists(path))
+        private const string StateFileName = "state.json";
+        private readonly string _stateDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DisableWindowsUpdates");
+
+        public bool TryLoad(out PersistentState state)
         {
-            state = new PersistentState();
-            return false;
+            var path = GetStateFilePath();
+            if (!File.Exists(path))
+            {
+                state = new PersistentState();
+                return false;
+            }
+
+            try
+            {
+                using (var stream = File.OpenRead(path))
+                {
+                    var serializer = new DataContractJsonSerializer(typeof(PersistentState));
+                    var deserialized = serializer.ReadObject(stream) as PersistentState;
+                    state = deserialized ?? new PersistentState();
+                    return deserialized != null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("Failed to load persisted state from disk.", ex);
+                state = new PersistentState();
+                return false;
+            }
         }
 
-        try
+        public void Save(PersistentState state)
         {
-            using var stream = File.OpenRead(path);
-            var serializer = new DataContractJsonSerializer(typeof(PersistentState));
-            state = (PersistentState?)serializer.ReadObject(stream) ?? new PersistentState();
-            return true;
+            Directory.CreateDirectory(_stateDirectory);
+            using (var stream = File.Create(GetStateFilePath()))
+            {
+                var serializer = new DataContractJsonSerializer(typeof(PersistentState));
+                serializer.WriteObject(stream, state);
+            }
+            Logger.Info("Persisted Windows Update state to disk.");
         }
-        catch
+
+        public void Clear()
         {
-            state = new PersistentState();
-            return false;
+            var path = GetStateFilePath();
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+                Logger.Info("Cleared persisted Windows Update state from disk.");
+            }
+        }
+
+        private string GetStateFilePath()
+        {
+            return Path.Combine(_stateDirectory, StateFileName);
         }
     }
 
-    public void Save(PersistentState state)
+    [DataContract]
+    internal sealed class PersistentState
     {
-        Directory.CreateDirectory(_stateDirectory);
-        using var stream = File.Create(GetStateFilePath());
-        var serializer = new DataContractJsonSerializer(typeof(PersistentState));
-        serializer.WriteObject(stream, state);
-    }
-
-    public void Clear()
-    {
-        var path = GetStateFilePath();
-        if (File.Exists(path))
+        public PersistentState()
         {
-            File.Delete(path);
+            Services = new Dictionary<string, ServiceSnapshot>(StringComparer.OrdinalIgnoreCase);
         }
+
+        [DataMember(Order = 1)]
+        public bool UpdatesDisabled { get; set; }
+
+        [DataMember(Order = 2)]
+        public Dictionary<string, ServiceSnapshot> Services { get; set; }
     }
 
-    private string GetStateFilePath() => Path.Combine(_stateDirectory, StateFileName);
-}
+    [DataContract]
+    internal sealed class ServiceSnapshot
+    {
+        [DataMember(Order = 1)]
+        public uint StartType { get; set; }
 
-[DataContract]
-internal sealed class PersistentState
-{
-    [DataMember(Order = 1)]
-    public bool UpdatesDisabled { get; set; }
-
-    [DataMember(Order = 2)]
-    public Dictionary<string, ServiceSnapshot> Services { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-}
-
-[DataContract]
-internal sealed class ServiceSnapshot
-{
-    [DataMember(Order = 1)]
-    public uint StartType { get; set; }
-
-    [DataMember(Order = 2)]
-    public string? SecurityDescriptor { get; set; }
+        [DataMember(Order = 2)]
+        public string SecurityDescriptor { get; set; }
+    }
 }
