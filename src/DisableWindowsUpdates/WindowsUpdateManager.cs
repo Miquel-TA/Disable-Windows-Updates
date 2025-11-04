@@ -99,23 +99,27 @@ internal sealed class WindowsUpdateManager
     {
         _notifier.ShowInfo("Restoring Windows Update services...");
 
-        if (!_stateRepository.TryLoad(out var state))
+        var stateLoaded = _stateRepository.TryLoad(out var state);
+        var restoreFailed = !stateLoaded;
+
+        if (!stateLoaded)
         {
             state = new PersistentState();
+            _notifier.ShowWarning("No persisted Windows Update state was found. Service permissions may remain locked until the disable operation is run again.");
         }
 
         state.Services ??= new Dictionary<string, ServiceSnapshot>(StringComparer.OrdinalIgnoreCase);
 
         var restoredServices = new List<string>();
-        var restoreFailed = false;
 
         foreach (var target in ServiceTargets)
         {
-            var restoredSuccessfully = false;
+            var serviceFailed = false;
+            var hadSnapshot = state.Services.TryGetValue(target.Name, out var snapshot);
 
             try
             {
-                if (state.Services.TryGetValue(target.Name, out var snapshot))
+                if (hadSnapshot)
                 {
                     if (!string.IsNullOrEmpty(snapshot.SecurityDescriptor))
                     {
@@ -127,6 +131,9 @@ internal sealed class WindowsUpdateManager
                 }
                 else
                 {
+                    restoreFailed = true;
+                    serviceFailed = true;
+                    _notifier.ShowWarning($"No persisted state was available for service {target.Name}. Its start type has been reset to Manual, but access control lists may still block Windows Update.");
                     ServiceManager.SetStartType(target.Name, ServiceStartType.Manual);
                 }
 
@@ -138,19 +145,20 @@ internal sealed class WindowsUpdateManager
                     }
                     catch (Exception startEx)
                     {
+                        restoreFailed = true;
+                        serviceFailed = true;
                         _notifier.ShowWarning($"Failed to start service {target.Name}: {startEx.Message}");
                     }
                 }
-
-                restoredSuccessfully = true;
             }
             catch (Exception ex)
             {
                 restoreFailed = true;
+                serviceFailed = true;
                 _notifier.ShowWarning($"Failed to restore service {target.Name}: {ex.Message}");
             }
 
-            if (restoredSuccessfully && state.Services.ContainsKey(target.Name))
+            if (!serviceFailed && hadSnapshot)
             {
                 restoredServices.Add(target.Name);
             }
@@ -163,7 +171,7 @@ internal sealed class WindowsUpdateManager
 
         if (restoreFailed)
         {
-            state.UpdatesDisabled = state.Services.Count > 0;
+            state.UpdatesDisabled = !stateLoaded || state.Services.Count > 0;
             _stateRepository.Save(state);
             _notifier.ShowWarning("Some Windows Update services could not be fully restored. Retry enabling once underlying issues are resolved.");
         }
