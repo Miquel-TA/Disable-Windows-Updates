@@ -1,6 +1,6 @@
 # Disable Windows Updates
 
-This repository contains a .NET Framework 4.8.1 Windows application that can disable or re-enable Windows Update with a single execution. The executable requests administrative privileges (through the application manifest) and then toggles the update infrastructure:
+This repository contains a .NET 8 Windows application that can disable or re-enable Windows Update with a single execution. The executable requests administrative privileges (through the application manifest) and then toggles the update infrastructure:
 
 * Stops the relevant services (`wuauserv`, `WaaSMedicSvc`, and `UsoSvc`).
 * Sets their startup type to `Disabled` (or restores it on re-enable).
@@ -17,7 +17,10 @@ src/DisableWindowsUpdates/               # WinForms-based runner (no UI, just tr
 
 ## Building
 
-Open the solution in Visual Studio 2022 (or newer) on Windows with .NET Framework 4.8.1 targeting pack installed, then build the `DisableWindowsUpdates` project in `Release` configuration.
+Install the .NET 8 SDK and either:
+
+* Open the solution in Visual Studio 2022 (17.8 or later) on Windows and build the `DisableWindowsUpdates` project in the desired configuration, or
+* From the repository root run `dotnet build` to produce a Windows-targeted executable under `src/DisableWindowsUpdates/bin/<Configuration>/net8.0-windows*/`.
 
 ## Usage
 
