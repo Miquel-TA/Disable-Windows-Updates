@@ -66,7 +66,7 @@ internal static class SystemRestoreManager
     {
         var trimmed = description.Trim();
         return trimmed.Length >= MaxDescriptionLength
-            ? trimmed[..(MaxDescriptionLength - 1)]
+            ? trimmed.Substring(0, MaxDescriptionLength - 1)
             : trimmed;
     }
 
