@@ -23,7 +23,7 @@ Open the solution in Visual Studio 2022 (or newer) on Windows with .NET Framewor
 
 Run the compiled executable on a Windows host. It will request elevation if required and then toggle the Windows Update state:
 
-* If updates are currently enabled, they will be stopped, disabled, locked down, and a notification will confirm success.
+* If updates are currently enabled, you will be prompted to optionally create a system restore point before the services are stopped, disabled, locked down, and a notification will confirm success.
 * If updates were previously disabled with this tool, running it again restores the saved configuration, re-enables the services, and shows a notification.
 
 State is stored under `%ProgramData%\DisableWindowsUpdates\state.json` so that the original configuration can be restored safely.

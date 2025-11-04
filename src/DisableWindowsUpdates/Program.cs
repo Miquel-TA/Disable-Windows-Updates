@@ -34,6 +34,36 @@ internal static class Program
             }
             else
             {
+                var promptResult = MessageBox.Show(
+                    "Do you want to create a system restore point before disabling Windows Update services?",
+                    "Create Restore Point",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question);
+
+                if (promptResult == DialogResult.Cancel)
+                {
+                    notifier.ShowWarning("Operation cancelled. Windows Update services were not modified.");
+                    notifier.FlushAndDispose(5000);
+                    return;
+                }
+
+                if (promptResult == DialogResult.Yes)
+                {
+                    notifier.ShowInfo("Creating system restore point...");
+                    if (SystemRestoreManager.TryCreateRestorePoint("Before disabling Windows Update services", out var error))
+                    {
+                        notifier.ShowInfo("System restore point created successfully.");
+                    }
+                    else if (!string.IsNullOrEmpty(error))
+                    {
+                        notifier.ShowWarning($"Failed to create a system restore point: {error}");
+                    }
+                    else
+                    {
+                        notifier.ShowWarning("Failed to create a system restore point.");
+                    }
+                }
+
                 manager.DisableUpdates();
             }
         }
