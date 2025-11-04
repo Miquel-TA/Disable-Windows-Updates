@@ -59,21 +59,31 @@ internal sealed class WindowsUpdateManager
 
         var state = new PersistentState
         {
-            UpdatesDisabled = true,
             Services = new Dictionary<string, ServiceSnapshot>(StringComparer.OrdinalIgnoreCase)
         };
+
+        var capturedServices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var target in ServiceTargets)
         {
             try
             {
                 var startType = ServiceManager.GetStartType(target.Name);
-                var descriptor = ServiceManager.GetSecurityDescriptor(target.Name);
+                string? descriptorString = null;
+
+                if (target.LockDown)
+                {
+                    var descriptor = ServiceManager.GetSecurityDescriptor(target.Name);
+                    descriptorString = Convert.ToBase64String(descriptor);
+                }
+
                 state.Services[target.Name] = new ServiceSnapshot
                 {
                     StartType = startType,
-                    SecurityDescriptor = Convert.ToBase64String(descriptor)
+                    SecurityDescriptor = descriptorString
                 };
+
+                capturedServices.Add(target.Name);
             }
             catch (Exception ex)
             {
@@ -81,8 +91,16 @@ internal sealed class WindowsUpdateManager
             }
         }
 
+        var anyServiceModified = false;
+
         foreach (var target in ServiceTargets)
         {
+            if (!capturedServices.Contains(target.Name))
+            {
+                _notifier.ShowWarning($"Skipping service {target.Name} because its configuration could not be captured safely. No changes will be made to this service.");
+                continue;
+            }
+
             try
             {
                 if (target.StopWhenDisabling)
@@ -91,6 +109,7 @@ internal sealed class WindowsUpdateManager
                 }
 
                 ServiceManager.SetStartType(target.Name, ServiceStartType.Disabled);
+                anyServiceModified = true;
 
                 if (target.LockDown)
                 {
@@ -103,6 +122,13 @@ internal sealed class WindowsUpdateManager
             }
         }
 
+        if (!anyServiceModified)
+        {
+            _notifier.ShowWarning("No Windows Update services were modified. The disable operation was canceled to avoid leaving services in an unknown state.");
+            return;
+        }
+
+        state.UpdatesDisabled = true;
         _stateRepository.Save(state);
         _notifier.ShowInfo("Windows Updates have been disabled and locked.");
     }
