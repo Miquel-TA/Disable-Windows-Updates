@@ -2,286 +2,332 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 
-namespace DisableWindowsUpdates;
-
-internal sealed class WindowsUpdateManager
+namespace DisableWindowsUpdates
 {
-    private static readonly IReadOnlyList<ServiceTarget> ServiceTargets = new List<ServiceTarget>
+    internal sealed class WindowsUpdateManager
     {
-        new("wuauserv", lockDown: true, stopWhenDisabling: true, startWhenEnabling: true),
-        new("WaaSMedicSvc", lockDown: true, stopWhenDisabling: true, startWhenEnabling: true),
-        new("UsoSvc", lockDown: false, stopWhenDisabling: true, startWhenEnabling: true)
-    };
-
-    private readonly StateRepository _stateRepository;
-    private readonly TrayNotifier _notifier;
-    private readonly HashSet<string> _reportedMissingServices = new(StringComparer.OrdinalIgnoreCase);
-
-    public WindowsUpdateManager(StateRepository stateRepository, TrayNotifier notifier)
-    {
-        _stateRepository = stateRepository;
-        _notifier = notifier;
-    }
-
-    public WindowsUpdateState GetCurrentState()
-    {
-        if (_stateRepository.TryLoad(out var state))
+        private static readonly IReadOnlyList<ServiceTarget> ServiceTargets = new List<ServiceTarget>
         {
-            var hasPersistedServices = state.Services is { Count: > 0 };
+            new ServiceTarget("wuauserv", true, true, true),
+            new ServiceTarget("WaaSMedicSvc", true, true, true),
+            new ServiceTarget("UsoSvc", false, true, true)
+        };
 
-            if (state.UpdatesDisabled)
+        private readonly StateRepository _stateRepository;
+        private readonly TrayNotifier _notifier;
+        private readonly HashSet<string> _reportedMissingServices;
+
+        public WindowsUpdateManager(StateRepository stateRepository, TrayNotifier notifier)
+        {
+            _stateRepository = stateRepository;
+            _notifier = notifier;
+            _reportedMissingServices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        public WindowsUpdateState GetCurrentState()
+        {
+            PersistentState state;
+            if (_stateRepository.TryLoad(out state))
             {
-                if (hasPersistedServices)
+                Dictionary<string, ServiceSnapshot> services = state.Services ?? new Dictionary<string, ServiceSnapshot>(StringComparer.OrdinalIgnoreCase);
+                bool hasPersistedServices = services.Count > 0;
+
+                if (state.UpdatesDisabled)
                 {
+                    Logger.Info("Persisted state indicates Windows Update services were previously disabled.");
+
+                    if (hasPersistedServices)
+                    {
+                        return WindowsUpdateState.Disabled;
+                    }
+
+                    foreach (ServiceTarget target in ServiceTargets)
+                    {
+                        uint startType;
+                        if (!TryGetStartType(target.Name, out startType))
+                        {
+                            continue;
+                        }
+
+                        if (startType != (uint)ServiceStartType.Disabled)
+                        {
+                            Logger.Info("Service " + target.Name + " is not disabled; considering updates enabled.");
+                            return WindowsUpdateState.Enabled;
+                        }
+                    }
+
+                    Logger.Info("All monitored services report a disabled state.");
                     return WindowsUpdateState.Disabled;
                 }
 
-                foreach (var target in ServiceTargets)
+                if (hasPersistedServices)
                 {
-                    if (!TryGetStartType(target.Name, out var startType))
+                    Logger.Warning("Persisted service snapshots exist while updates are marked enabled; treating state as Disabled for safety.");
+                    return WindowsUpdateState.Disabled;
+                }
+            }
+
+            uint wuauservStartType;
+            if (TryGetStartType("wuauserv", out wuauservStartType))
+            {
+                return wuauservStartType == (uint)ServiceStartType.Disabled
+                    ? WindowsUpdateState.Disabled
+                    : WindowsUpdateState.Enabled;
+            }
+
+            Logger.Warning("Unable to read wuauserv configuration; defaulting state to Enabled.");
+            return WindowsUpdateState.Enabled;
+        }
+
+        public void DisableUpdates()
+        {
+            _notifier.ShowInfo("Disabling Windows Update services...");
+            Logger.Info("Beginning disable operation for Windows Update services.");
+
+            PersistentState state = new PersistentState();
+            Dictionary<string, ServiceSnapshot> services = state.Services;
+            HashSet<string> capturedServices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (ServiceTarget target in ServiceTargets)
+            {
+                try
+                {
+                    uint startType = ServiceManager.GetStartType(target.Name);
+                    string descriptorString = null;
+
+                    if (target.LockDown)
                     {
-                        continue;
+                        byte[] descriptor = ServiceManager.GetSecurityDescriptor(target.Name);
+                        descriptorString = Convert.ToBase64String(descriptor);
                     }
 
-                    if (startType != (uint)ServiceStartType.Disabled)
+                    services[target.Name] = new ServiceSnapshot
                     {
-                        return WindowsUpdateState.Enabled;
-                    }
+                        StartType = startType,
+                        SecurityDescriptor = descriptorString
+                    };
+
+                    capturedServices.Add(target.Name);
+                    Logger.Info("Captured configuration for service " + target.Name + ".");
                 }
-
-                return WindowsUpdateState.Disabled;
-            }
-
-            if (hasPersistedServices)
-            {
-                return WindowsUpdateState.Disabled;
-            }
-        }
-
-        if (TryGetStartType("wuauserv", out var wuauservStartType))
-        {
-            return wuauservStartType == (uint)ServiceStartType.Disabled
-                ? WindowsUpdateState.Disabled
-                : WindowsUpdateState.Enabled;
-        }
-
-        return WindowsUpdateState.Enabled;
-    }
-
-    public void DisableUpdates()
-    {
-        _notifier.ShowInfo("Disabling Windows Update services...");
-
-        var state = new PersistentState
-        {
-            Services = new Dictionary<string, ServiceSnapshot>(StringComparer.OrdinalIgnoreCase)
-        };
-
-        var capturedServices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var target in ServiceTargets)
-        {
-            try
-            {
-                var startType = ServiceManager.GetStartType(target.Name);
-                string? descriptorString = null;
-
-                if (target.LockDown)
+                catch (Exception ex)
                 {
-                    var descriptor = ServiceManager.GetSecurityDescriptor(target.Name);
-                    descriptorString = Convert.ToBase64String(descriptor);
-                }
-
-                state.Services[target.Name] = new ServiceSnapshot
-                {
-                    StartType = startType,
-                    SecurityDescriptor = descriptorString
-                };
-
-                capturedServices.Add(target.Name);
-            }
-            catch (Exception ex)
-            {
-                _notifier.ShowWarning($"Failed to capture state for service {target.Name}: {ex.Message}");
-            }
-        }
-
-        var anyServiceModified = false;
-
-        foreach (var target in ServiceTargets)
-        {
-            if (!capturedServices.Contains(target.Name))
-            {
-                _notifier.ShowWarning($"Skipping service {target.Name} because its configuration could not be captured safely. No changes will be made to this service.");
-                continue;
-            }
-
-            try
-            {
-                if (target.StopWhenDisabling)
-                {
-                    ServiceManager.StopService(target.Name, TimeSpan.FromSeconds(30));
-                }
-
-                ServiceManager.SetStartType(target.Name, ServiceStartType.Disabled);
-                anyServiceModified = true;
-
-                if (target.LockDown)
-                {
-                    ServiceManager.ApplyLockdown(target.Name);
+                    Logger.Error("Failed to capture state for service " + target.Name + ".", ex);
+                    _notifier.ShowWarning("Failed to capture state for service " + target.Name + ": " + ex.Message);
                 }
             }
-            catch (Exception ex)
+
+            bool anyServiceModified = false;
+
+            foreach (ServiceTarget target in ServiceTargets)
             {
-                _notifier.ShowWarning($"Failed to harden service {target.Name}: {ex.Message}");
-            }
-        }
-
-        if (!anyServiceModified)
-        {
-            _notifier.ShowWarning("No Windows Update services were modified. The disable operation was canceled to avoid leaving services in an unknown state.");
-            return;
-        }
-
-        state.UpdatesDisabled = true;
-        _stateRepository.Save(state);
-        _notifier.ShowInfo("Windows Updates have been disabled and locked.");
-    }
-
-    public void EnableUpdates()
-    {
-        _notifier.ShowInfo("Restoring Windows Update services...");
-
-        var stateLoaded = _stateRepository.TryLoad(out var state);
-        var restoreFailed = !stateLoaded;
-
-        if (!stateLoaded)
-        {
-            state = new PersistentState();
-            _notifier.ShowWarning("No persisted Windows Update state was found. Service permissions may remain locked until the disable operation is run again.");
-        }
-
-        state.Services ??= new Dictionary<string, ServiceSnapshot>(StringComparer.OrdinalIgnoreCase);
-
-        var restoredServices = new List<string>();
-
-        foreach (var target in ServiceTargets)
-        {
-            var serviceFailed = false;
-            var hadSnapshot = state.Services.TryGetValue(target.Name, out var snapshot);
-
-            try
-            {
-                if (hadSnapshot)
+                if (!capturedServices.Contains(target.Name))
                 {
-                    if (!string.IsNullOrEmpty(snapshot.SecurityDescriptor))
+                    Logger.Warning("Skipping service " + target.Name + " because state capture was unsuccessful.");
+                    _notifier.ShowWarning("Skipping service " + target.Name + " because its configuration could not be captured safely. No changes will be made to this service.");
+                    continue;
+                }
+
+                try
+                {
+                    if (target.StopWhenDisabling)
                     {
-                        var descriptor = Convert.FromBase64String(snapshot.SecurityDescriptor);
-                        ServiceManager.RestoreSecurityDescriptor(target.Name, descriptor);
+                        ServiceManager.StopService(target.Name, TimeSpan.FromSeconds(30));
+                        Logger.Info("Stopped service " + target.Name + " prior to disabling.");
                     }
 
-                    ServiceManager.SetStartType(target.Name, (ServiceStartType)snapshot.StartType);
-                }
-                else
-                {
-                    restoreFailed = true;
-                    serviceFailed = true;
-                    _notifier.ShowWarning($"No persisted state was available for service {target.Name}. Its start type has been reset to Manual, but access control lists may still block Windows Update.");
-                    ServiceManager.SetStartType(target.Name, ServiceStartType.Manual);
-                }
+                    ServiceManager.SetStartType(target.Name, ServiceStartType.Disabled);
+                    anyServiceModified = true;
+                    Logger.Info("Set service " + target.Name + " start type to Disabled.");
 
-                if (target.StartWhenEnabling)
-                {
-                    try
+                    if (target.LockDown)
                     {
-                        ServiceManager.StartService(target.Name, TimeSpan.FromSeconds(30));
+                        ServiceManager.ApplyLockdown(target.Name);
+                        Logger.Info("Applied access control lockdown to service " + target.Name + ".");
                     }
-                    catch (Exception startEx)
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error("Failed to harden service " + target.Name + ".", ex);
+                    _notifier.ShowWarning("Failed to harden service " + target.Name + ": " + ex.Message);
+                }
+            }
+
+            if (!anyServiceModified)
+            {
+                Logger.Warning("Disable operation aborted because no services could be modified.");
+                _notifier.ShowWarning("No Windows Update services were modified. The disable operation was canceled to avoid leaving services in an unknown state.");
+                return;
+            }
+
+            state.UpdatesDisabled = true;
+            _stateRepository.Save(state);
+            Logger.Info("Disable operation completed successfully.");
+            _notifier.ShowInfo("Windows Updates have been disabled and locked.");
+        }
+
+        public void EnableUpdates()
+        {
+            _notifier.ShowInfo("Restoring Windows Update services...");
+            Logger.Info("Beginning enable operation for Windows Update services.");
+
+            PersistentState state;
+            bool stateLoaded = _stateRepository.TryLoad(out state);
+            bool restoreFailed = !stateLoaded;
+
+            if (!stateLoaded)
+            {
+                Logger.Warning("No persisted state was available when attempting to enable services.");
+                state = new PersistentState();
+                _notifier.ShowWarning("No persisted Windows Update state was found. Service permissions may remain locked until the disable operation is run again.");
+            }
+
+            if (state.Services == null)
+            {
+                state.Services = new Dictionary<string, ServiceSnapshot>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            List<string> restoredServices = new List<string>();
+
+            foreach (ServiceTarget target in ServiceTargets)
+            {
+                bool serviceFailed = false;
+                ServiceSnapshot snapshot;
+                bool hadSnapshot = state.Services.TryGetValue(target.Name, out snapshot);
+
+                try
+                {
+                    if (hadSnapshot)
+                    {
+                        if (!string.IsNullOrEmpty(snapshot.SecurityDescriptor))
+                        {
+                            byte[] descriptor = Convert.FromBase64String(snapshot.SecurityDescriptor);
+                            ServiceManager.RestoreSecurityDescriptor(target.Name, descriptor);
+                            Logger.Info("Restored security descriptor for service " + target.Name + ".");
+                        }
+
+                        ServiceManager.SetStartType(target.Name, (ServiceStartType)snapshot.StartType);
+                        Logger.Info("Restored start type for service " + target.Name + ".");
+                    }
+                    else
                     {
                         restoreFailed = true;
                         serviceFailed = true;
-                        _notifier.ShowWarning($"Failed to start service {target.Name}: {startEx.Message}");
+                        Logger.Warning("No persisted state for service " + target.Name + "; defaulting to Manual.");
+                        _notifier.ShowWarning("No persisted state was available for service " + target.Name + ". Its start type has been reset to Manual, but access control lists may still block Windows Update.");
+                        ServiceManager.SetStartType(target.Name, ServiceStartType.Manual);
+                    }
+
+                    if (target.StartWhenEnabling)
+                    {
+                        try
+                        {
+                            ServiceManager.StartService(target.Name, TimeSpan.FromSeconds(30));
+                            Logger.Info("Started service " + target.Name + " after restoration.");
+                        }
+                        catch (Exception startEx)
+                        {
+                            restoreFailed = true;
+                            serviceFailed = true;
+                            Logger.Error("Failed to start service " + target.Name + " after enabling.", startEx);
+                            _notifier.ShowWarning("Failed to start service " + target.Name + ": " + startEx.Message);
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    restoreFailed = true;
+                    serviceFailed = true;
+                    Logger.Error("Failed to restore service " + target.Name + ".", ex);
+                    _notifier.ShowWarning("Failed to restore service " + target.Name + ": " + ex.Message);
+                }
+
+                if (!serviceFailed && hadSnapshot)
+                {
+                    restoredServices.Add(target.Name);
+                }
             }
-            catch (Exception ex)
+
+            foreach (string service in restoredServices)
             {
-                restoreFailed = true;
-                serviceFailed = true;
-                _notifier.ShowWarning($"Failed to restore service {target.Name}: {ex.Message}");
+                state.Services.Remove(service);
             }
 
-            if (!serviceFailed && hadSnapshot)
+            if (restoreFailed)
             {
-                restoredServices.Add(target.Name);
+                state.UpdatesDisabled = !stateLoaded || state.Services.Count > 0;
+                _stateRepository.Save(state);
+                Logger.Warning("Enable operation completed with warnings; some services remain unrestored.");
+                _notifier.ShowWarning("Some Windows Update services could not be fully restored. Retry enabling once underlying issues are resolved.");
+            }
+            else
+            {
+                state.UpdatesDisabled = false;
+                state.Services.Clear();
+                _stateRepository.Clear();
+                Logger.Info("Enable operation completed successfully.");
+                _notifier.ShowInfo("Windows Updates have been re-enabled.");
             }
         }
 
-        foreach (var service in restoredServices)
+        private bool TryGetStartType(string serviceName, out uint startType)
         {
-            state.Services.Remove(service);
+            try
+            {
+                startType = ServiceManager.GetStartType(serviceName);
+                return true;
+            }
+            catch (InvalidOperationException ex)
+            {
+                ReportMissingService(serviceName, ex);
+            }
+            catch (Win32Exception ex)
+            {
+                if (ex.NativeErrorCode == 1060)
+                {
+                    ReportMissingService(serviceName, ex);
+                }
+                else
+                {
+                    Logger.Error("Failed to query start type for service " + serviceName + ".", ex);
+                }
+            }
+
+            startType = 0;
+            return false;
         }
 
-        if (restoreFailed)
+        private void ReportMissingService(string serviceName, Exception ex)
         {
-            state.UpdatesDisabled = !stateLoaded || state.Services.Count > 0;
-            _stateRepository.Save(state);
-            _notifier.ShowWarning("Some Windows Update services could not be fully restored. Retry enabling once underlying issues are resolved.");
-        }
-        else
-        {
-            state.UpdatesDisabled = false;
-            state.Services.Clear();
-            _stateRepository.Clear();
-            _notifier.ShowInfo("Windows Updates have been re-enabled.");
+            if (_reportedMissingServices.Add(serviceName))
+            {
+                Logger.Warning("Service " + serviceName + " was not found: " + ex.Message);
+                _notifier.ShowWarning("Service " + serviceName + " was not found on this system and will be skipped when evaluating Windows Update state: " + ex.Message);
+            }
         }
     }
 
-    private bool TryGetStartType(string serviceName, out uint startType)
+    internal sealed class ServiceTarget
     {
-        try
+        public ServiceTarget(string name, bool lockDown, bool stopWhenDisabling, bool startWhenEnabling)
         {
-            startType = ServiceManager.GetStartType(serviceName);
-            return true;
-        }
-        catch (InvalidOperationException ex)
-        {
-            ReportMissingService(serviceName, ex);
-        }
-        catch (Win32Exception ex) when (ex.NativeErrorCode == 1060)
-        {
-            ReportMissingService(serviceName, ex);
+            if (name == null)
+            {
+                throw new ArgumentNullException("name");
+            }
+
+            Name = name;
+            LockDown = lockDown;
+            StopWhenDisabling = stopWhenDisabling;
+            StartWhenEnabling = startWhenEnabling;
         }
 
-        startType = default;
-        return false;
+        public string Name { get; private set; }
+
+        public bool LockDown { get; private set; }
+
+        public bool StopWhenDisabling { get; private set; }
+
+        public bool StartWhenEnabling { get; private set; }
     }
-
-    private void ReportMissingService(string serviceName, Exception ex)
-    {
-        if (_reportedMissingServices.Add(serviceName))
-        {
-            _notifier.ShowWarning($"Service {serviceName} was not found on this system and will be skipped when evaluating Windows Update state: {ex.Message}");
-        }
-    }
-
-}
-
-internal sealed class ServiceTarget
-{
-    public ServiceTarget(string name, bool lockDown, bool stopWhenDisabling, bool startWhenEnabling)
-    {
-        Name = name ?? throw new ArgumentNullException(nameof(name));
-        LockDown = lockDown;
-        StopWhenDisabling = stopWhenDisabling;
-        StartWhenEnabling = startWhenEnabling;
-    }
-
-    public string Name { get; }
-
-    public bool LockDown { get; }
-
-    public bool StopWhenDisabling { get; }
-
-    public bool StartWhenEnabling { get; }
 }
