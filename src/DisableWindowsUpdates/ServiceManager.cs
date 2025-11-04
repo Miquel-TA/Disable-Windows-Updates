@@ -4,11 +4,14 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.ServiceProcess;
+using Microsoft.Win32.SafeHandles;
 
 namespace DisableWindowsUpdates
 {
     internal static class ServiceManager
     {
+        private const SecurityInfos SecurityInfoFlags = SecurityInfos.Owner | SecurityInfos.Group | SecurityInfos.DiscretionaryAcl;
+
         public static uint GetStartType(string serviceName)
         {
             using (var controller = new ServiceController(serviceName))
@@ -52,10 +55,9 @@ namespace DisableWindowsUpdates
 
         public static byte[] GetSecurityDescriptor(string serviceName)
         {
-            using (var controller = new ServiceController(serviceName))
+            using (var handle = OpenServiceHandle(serviceName, ServiceAccessRights.ReadControl))
             {
-                var security = controller.GetAccessControl();
-                return security.GetSecurityDescriptorBinaryForm();
+                return GetServiceSecurityDescriptor(handle);
             }
         }
 
@@ -63,34 +65,22 @@ namespace DisableWindowsUpdates
         {
             if (descriptor == null)
             {
-                throw new ArgumentNullException("descriptor");
+                throw new ArgumentNullException(nameof(descriptor));
             }
 
-            using (var controller = new ServiceController(serviceName))
+            using (var handle = OpenServiceHandle(serviceName, ServiceAccessRights.ReadControl | ServiceAccessRights.WriteDac))
             {
-                var security = controller.GetAccessControl();
-                var commonDescriptor = new CommonSecurityDescriptor(false, false, descriptor, 0);
-                var sddl = commonDescriptor.GetSddlForm(AccessControlSections.Access);
-                security.SetSecurityDescriptorSddlForm(sddl, AccessControlSections.Access);
-                controller.SetAccessControl(security);
+                SetServiceSecurityDescriptor(handle, descriptor);
             }
         }
 
         public static void ApplyLockdown(string serviceName)
         {
-            using (var controller = new ServiceController(serviceName))
+            using (var handle = OpenServiceHandle(serviceName, ServiceAccessRights.ReadControl | ServiceAccessRights.WriteDac))
             {
-                var security = controller.GetAccessControl();
-                security.SetAccessRuleProtection(true, false);
-
-                foreach (AuthorizationRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
-                {
-                    var accessRule = rule as ServiceAccessRule;
-                    if (accessRule != null)
-                    {
-                        security.RemoveAccessRuleSpecific(accessRule);
-                    }
-                }
+                var descriptorBytes = GetServiceSecurityDescriptor(handle);
+                var security = new CommonSecurityDescriptor(false, false, descriptorBytes, 0);
+                security.SetDiscretionaryAclProtection(true, false);
 
                 var adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
                 var systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
@@ -104,15 +94,78 @@ namespace DisableWindowsUpdates
                     Logger.Warning("TrustedInstaller account could not be resolved on this system.");
                 }
 
-                security.AddAccessRule(new ServiceAccessRule(adminSid, ServiceControllerRights.FullControl, AccessControlType.Allow));
-                security.AddAccessRule(new ServiceAccessRule(systemSid, ServiceControllerRights.QueryStatus | ServiceControllerRights.Interrogate, AccessControlType.Allow));
-                security.AddAccessRule(new ServiceAccessRule(systemSid, ServiceControllerRights.Start | ServiceControllerRights.ChangeConfig | ServiceControllerRights.Stop, AccessControlType.Deny));
+                var lockdownAcl = new DiscretionaryAcl(false, false, 4);
+                var lockdownRights = ServiceAccessRights.Start | ServiceAccessRights.ChangeConfig | ServiceAccessRights.Stop;
+
+                lockdownAcl.AddAccess(AccessControlType.Deny, systemSid, (int)lockdownRights, InheritanceFlags.None, PropagationFlags.None);
                 if (trustedInstallerSid != null)
                 {
-                    security.AddAccessRule(new ServiceAccessRule(trustedInstallerSid, ServiceControllerRights.Start | ServiceControllerRights.ChangeConfig | ServiceControllerRights.Stop, AccessControlType.Deny));
+                    lockdownAcl.AddAccess(AccessControlType.Deny, trustedInstallerSid, (int)lockdownRights, InheritanceFlags.None, PropagationFlags.None);
                 }
 
-                controller.SetAccessControl(security);
+                var systemAllowRights = ServiceAccessRights.QueryStatus | ServiceAccessRights.Interrogate | ServiceAccessRights.ReadControl;
+                lockdownAcl.AddAccess(AccessControlType.Allow, systemSid, (int)systemAllowRights, InheritanceFlags.None, PropagationFlags.None);
+                lockdownAcl.AddAccess(AccessControlType.Allow, adminSid, (int)ServiceAccessRights.AllAccess, InheritanceFlags.None, PropagationFlags.None);
+
+                security.DiscretionaryAcl = lockdownAcl;
+
+                var updatedDescriptor = new byte[security.BinaryLength];
+                security.GetBinaryForm(updatedDescriptor, 0);
+
+                SetServiceSecurityDescriptor(handle, updatedDescriptor);
+            }
+        }
+
+        private static SafeServiceHandle OpenServiceHandle(string serviceName, ServiceAccessRights accessRights)
+        {
+            var scmHandle = NativeMethods.OpenSCManager(null, null, NativeMethods.SC_MANAGER_CONNECT);
+            if (scmHandle == IntPtr.Zero)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            try
+            {
+                var serviceHandle = NativeMethods.OpenService(scmHandle, serviceName, (uint)accessRights);
+                if (serviceHandle == IntPtr.Zero)
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+
+                return new SafeServiceHandle(serviceHandle);
+            }
+            finally
+            {
+                NativeMethods.CloseServiceHandle(scmHandle);
+            }
+        }
+
+        private static byte[] GetServiceSecurityDescriptor(SafeServiceHandle serviceHandle)
+        {
+            uint bytesNeeded = 0;
+            if (!NativeMethods.QueryServiceObjectSecurity(serviceHandle.DangerousGetHandle(), SecurityInfoFlags, null, 0, out bytesNeeded))
+            {
+                var error = Marshal.GetLastWin32Error();
+                if (error != NativeMethods.ERROR_INSUFFICIENT_BUFFER)
+                {
+                    throw new Win32Exception(error);
+                }
+            }
+
+            var buffer = new byte[bytesNeeded];
+            if (!NativeMethods.QueryServiceObjectSecurity(serviceHandle.DangerousGetHandle(), SecurityInfoFlags, buffer, bytesNeeded, out bytesNeeded))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            return buffer;
+        }
+
+        private static void SetServiceSecurityDescriptor(SafeServiceHandle serviceHandle, byte[] descriptor)
+        {
+            if (!NativeMethods.SetServiceObjectSecurity(serviceHandle.DangerousGetHandle(), SecurityInfoFlags, descriptor))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
             }
         }
 
@@ -151,16 +204,46 @@ namespace DisableWindowsUpdates
             }
         }
 
+        private sealed class SafeServiceHandle : SafeHandleZeroOrMinusOneIsInvalid
+        {
+            public SafeServiceHandle(IntPtr handle)
+                : base(true)
+            {
+                SetHandle(handle);
+            }
+
+            protected override bool ReleaseHandle()
+            {
+                return NativeMethods.CloseServiceHandle(handle);
+            }
+        }
+
         private static class NativeMethods
         {
             public const uint ServiceNoChange = 0xFFFFFFFF;
             public const int ERROR_INSUFFICIENT_BUFFER = 122;
+            public const uint SC_MANAGER_CONNECT = 0x0001;
 
             [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
             public static extern bool ChangeServiceConfig(IntPtr hService, uint nServiceType, uint nStartType, uint nErrorControl, string lpBinaryPathName, string lpLoadOrderGroup, IntPtr lpdwTagId, string lpDependencies, string lpServiceStartName, string lpPassword, string lpDisplayName);
 
             [DllImport("advapi32.dll", SetLastError = true)]
             public static extern bool QueryServiceConfig(IntPtr hService, IntPtr lpServiceConfig, uint cbBufSize, out uint pcbBytesNeeded);
+
+            [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+            public static extern IntPtr OpenSCManager(string machineName, string databaseName, uint dwDesiredAccess);
+
+            [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+            public static extern IntPtr OpenService(IntPtr hSCManager, string lpServiceName, uint dwDesiredAccess);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            public static extern bool CloseServiceHandle(IntPtr hSCObject);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            public static extern bool QueryServiceObjectSecurity(IntPtr hService, SecurityInfos dwSecurityInformation, byte[] lpSecurityDescriptor, uint cbBufSize, out uint pcbBytesNeeded);
+
+            [DllImport("advapi32.dll", SetLastError = true)]
+            public static extern bool SetServiceObjectSecurity(IntPtr hService, SecurityInfos dwSecurityInformation, byte[] lpSecurityDescriptor);
         }
     }
 }
@@ -186,4 +269,23 @@ internal enum ServiceStartType : uint
     Automatic = 2,
     Manual = 3,
     Disabled = 4
+}
+
+[Flags]
+internal enum ServiceAccessRights : uint
+{
+    QueryConfig = 0x0001,
+    ChangeConfig = 0x0002,
+    QueryStatus = 0x0004,
+    EnumerateDependents = 0x0008,
+    Start = 0x0010,
+    Stop = 0x0020,
+    PauseContinue = 0x0040,
+    Interrogate = 0x0080,
+    UserDefinedControl = 0x0100,
+    Delete = 0x00010000,
+    ReadControl = 0x00020000,
+    WriteDac = 0x00040000,
+    WriteOwner = 0x00080000,
+    AllAccess = 0x000F01FF
 }
