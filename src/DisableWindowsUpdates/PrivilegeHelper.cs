@@ -30,7 +30,7 @@ namespace DisableWindowsUpdates
                     var executablePath = currentProcess.MainModule != null ? currentProcess.MainModule.FileName : null;
                     if (string.IsNullOrEmpty(executablePath))
                     {
-                        executablePath = AppDomain.CurrentDomain.SetupInformation.ApplicationName;
+                        executablePath = Environment.ProcessPath;
                     }
 
                     if (string.IsNullOrEmpty(executablePath))

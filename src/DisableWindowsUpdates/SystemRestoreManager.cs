@@ -55,16 +55,16 @@ namespace DisableWindowsUpdates
                 Logger.Info("System restore point created with description: " + sanitizedDescription);
                 return true;
             }
-            catch (ExternalException ex)
-            {
-                failureReason = ex.Message;
-                Logger.Error("System restore point creation failed due to an external exception.", ex);
-                return false;
-            }
             catch (Win32Exception ex)
             {
                 failureReason = ex.Message;
                 Logger.Error("System restore point creation failed due to a Win32 exception.", ex);
+                return false;
+            }
+            catch (ExternalException ex)
+            {
+                failureReason = ex.Message;
+                Logger.Error("System restore point creation failed due to an external exception.", ex);
                 return false;
             }
             catch (Exception ex)
